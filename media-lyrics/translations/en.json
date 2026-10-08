@@ -4,14 +4,17 @@
     "unknown-artist": "Unknown artist"
   },
   "panel": {
+    "choose-lyrics": "Lyrics variants",
     "loading-lyrics": "Loading lyrics…",
     "lyrics-error": "Lyrics error: ",
     "no-lyrics": "No lyrics found",
     "no-media-player": "No media player",
+    "no-variants": "No alternative lyrics found",
     "now-playing": "NOW PLAYING",
     "reload-lyrics": "Reload lyrics",
     "synced": "synced",
-    "unsynced": "unsynced"
+    "unsynced": "unsynced",
+    "variant-default": "Default"
   },
   "provider": {
     "cache": "Cache",
@@ -68,8 +71,17 @@
       "options": {
         "compact": "Compact (440)",
         "large": "Large (640)",
-        "medium": "Medium (520)"
+        "medium": "Medium (520)",
+        "mini": "Mini"
       }
+    },
+    "player_allowlist": {
+      "description": "Comma-separated player names (identity or bus name). When set, only matching players are shown. Empty = show any player.",
+      "label": "Player allowlist"
+    },
+    "player_blocklist": {
+      "description": "Comma-separated player names (identity or bus name) to hide. Empty = hide none.",
+      "label": "Player blocklist"
     },
     "show_lyric_line": {
       "description": "Show the current synced lyric line in the chip instead of the artist (title stays).",

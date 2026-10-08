@@ -2,6 +2,7 @@ local theme = require("../../utils/theme.luau")
 local state = require("../state.luau")
 local common = require("../common.luau")
 local rerender = require("../rerender.luau")
+local request = require("../actions.luau")
 
 local function build_library()
 	local data = state.data
@@ -10,10 +11,11 @@ local function build_library()
 
 	local filter = view.library_filter or "all"
 
+	local is_refreshing_lib = (data.refreshing_library == true)
 	table.insert(
 		child,
-		ui.row({ key = "lib-head", align = "center", justify = "space_between" }, {
-			ui.column({ gap = 4 }, {
+		ui.row({ key = "lib-head", align = "center", justify = "space_between", radius = theme.radius }, {
+			ui.column({ gap = 4, radius = theme.radius }, {
 				ui.label({ text = "LIBRARY", fontSize = theme.fontHero, fontWeight = "bold", color = "on_surface" }),
 				ui.label({
 					text = #data.library .. " items in your YouTube Music library",
@@ -21,10 +23,20 @@ local function build_library()
 					color = "on_surface_variant",
 				}),
 			}),
+			ui.button({
+				key = "btn-sync-lib-head",
+				glyph = is_refreshing_lib and "loader" or "refresh",
+				variant = "secondary",
+				controlSize = "md",
+				tooltip = is_refreshing_lib and "Refreshing library..." or "Refresh library",
+				onClick = is_refreshing_lib and nil or function()
+					request("refresh_library", {})
+				end,
+			}),
 		})
 	)
 
-	table.insert(child, ui.row({ key = "spacer-lib-1", height = 8, borderWidth = 0 }))
+	table.insert(child, ui.row({ key = "spacer-lib-1", height = 8, borderWidth = 0, radius = theme.radius }))
 
 	-- Filter chips
 	local chips = {
@@ -53,6 +65,7 @@ local function build_library()
 					view.library_filter = c.id
 					rerender.call()
 				end,
+				radius = theme.radius,
 			}, {
 				ui.label({
 					text = c.label,
@@ -63,8 +76,8 @@ local function build_library()
 			})
 		)
 	end
-	table.insert(child, ui.row({ key = "lib-chips-row", align = "center", gap = 8 }, chip_elems))
-	table.insert(child, ui.row({ key = "spacer-lib-2", height = 14, borderWidth = 0 }))
+	table.insert(child, ui.row({ key = "lib-chips-row", align = "center", gap = 8, radius = theme.radius }, chip_elems))
+	table.insert(child, ui.row({ key = "spacer-lib-2", height = 14, borderWidth = 0, radius = theme.radius }))
 
 	-- Filter items
 	local items = {}
@@ -104,7 +117,7 @@ local function build_library()
 	if #items == 0 then
 		table.insert(
 			child,
-			ui.row({ key = "lib-empty", align = "center", justify = "center", padding = 40 }, {
+			ui.row({ key = "lib-empty", align = "center", justify = "center", padding = 40, radius = theme.radius }, {
 				ui.label({
 					text = state.logged_in() and "No items match your filter" or "Sign in to see your library",
 					fontSize = theme.fontTitle,
@@ -136,6 +149,7 @@ local function build_library()
 					border = "primary/0.4",
 					fill = is_hovered and "primary/0.12" or "primary/0.04",
 					flexGrow = 1,
+					radius = theme.radius,
 					onClick = function()
 						view.hover_key.card = nil
 						if iid:sub(1, 2) == "UC" then
@@ -147,7 +161,7 @@ local function build_library()
 					onHover = "onCardHover",
 				}, {
 					common.thumb_or_placeholder(thumb_path, 200, icon_name, 38, "primary", is_hovered and "primary/0.2" or "surface_variant/0.6"),
-					ui.column({ gap = 2, flexGrow = 1 }, {
+					ui.column({ gap = 2, flexGrow = 1, radius = theme.radius }, {
 						ui.label({
 							text = item.title,
 							fontSize = theme.fontTitle,

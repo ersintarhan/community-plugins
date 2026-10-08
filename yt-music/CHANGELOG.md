@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.3.3] - 2026-09-28
+
+### Added
+- **Queue reordering**: drag a track by its grip to move it; the playing track keeps playing and follows its own place. A manual order also supersedes the pre-shuffle snapshot.
+
+## [0.3.2] - 2026-10-02
+
+### Added
+ - **Media widget transport**: Next/Previous now work in Noctalia's core media widget (and `playerctl`) while a track plays, advancing the same queue as the miniplayer and full panel.
+ 
+## [0.3.1] - 2026-09-28
+
+### Fixed
+- **Player bar artist fallback**: the subtitle line now shows `Unknown artist` when a track is loaded without artist metadata instead of `Pick something to play`.
+
+## [0.3.0] - 2026-09-25
+
+### Added
+- **Shell corner radius scale**: every panel and mini-player surface now follows the shell's `shell.corner_radius_scale` setting via `theme.radius` (default 12 * scale), re-read each time a panel opens.
+
+## [0.2.8] - 2026-09-24
+
+### Fixed
+- **Tracks starting paused**: mpv is now launched with `--pause=no` so songs starts playing immediately instead of being stuck in a paused state.
+
+## [0.2.7] - 2026-09-21
+
+### Added
+- Music artwork in the Noctalia media widget via MPRIS (`mpv-mpris` `cover-art-files`).
+
+## [0.2.6] - 2026-09-12
+
+### Fixed
+- **CPU budget watchdog**: Decoupled state watch callback handling in `service.luau` using asynchronous dispatch, preventing Noctalia's watchdog from killing the service with `state watch callback exceeded its CPU budget`.
+- **UTF-8 string corruption**: Replaced byte-class patterns (`[^•]`) with byte-safe plain string search in delimiter parsing (`helpers.luau`), resolving invalid UTF-8 byte crashes (`0x96`) on Asian characters, Japanese typography, and unicode delimiters.
+- **Playlist track count fallback**: Added fallback calculation for albums and playlists lacking explicit total track count to prevent the UI from remaining stuck on `Loading tracks... 0 total`.
+- **Atomic offline library audit**: Prevented playlists from temporarily vanishing or showing 0 tracks during startup/rescan by making downloaded playlist state transitions atomic.
+- **Login state detection race**: Added fallback disk verification for `cookies.txt` in UI state initialization, preventing temporary unauthenticated banner flashes during startup.
+- **Download metadata disk writes**: Batched offline metadata saves during bulk playlist queueing instead of writing disk state per item.
+- **Scratch file collisions**: Increased scratch file rotation pool from 8 to 128 slots to prevent concurrent request data overwrites.
+- **Offline library protection**: Prevented library refresh from executing when offline or wiping cached playlists on failed fetches.
+
+### Added
+- **Manual library refresh**: Added refresh buttons with animated loading spinner states to both the sidebar header and the Library view to trigger instantaneous resync of user playlists and library state.
+- **Stream resolution resilience**: Updated yt-dlp resolver to request `bestaudio/best` with `mweb,web` client fallbacks, bypassing YouTube throttling without unnecessary audio re-encoding.
+- **In-memory thumbnail caching**: Avoids redundant disk stat calls for already resolved thumbnail paths.
+
 ## [0.2.5] - 2026-09-04
 
 ### Fixed

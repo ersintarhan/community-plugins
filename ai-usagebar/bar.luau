@@ -8,7 +8,7 @@ local account = noctalia.string.trim(tostring(noctalia.getConfig("account") or "
 local extras = tostring(noctalia.getConfig("extras") or "countdown")
 -- Named after the core `sysmon` widget's own keys, so a reading in this capsule
 -- is configured the same way as the CPU one beside it.
-local visualization = tostring(noctalia.getConfig("visualization") or "none")
+local visualization = tostring(noctalia.getConfig("visualization") or "gauge")
 local showValue = noctalia.getConfig("show_value") ~= false
 local showGlyph = noctalia.getConfig("show_glyph") ~= false
 local glyphAfter = tostring(noctalia.getConfig("glyph_position") or "before") == "after"
@@ -20,13 +20,16 @@ local report = nil
 
 local shared = require("./shared.luau")
 local providerGlyph, baseProvider = shared.providerGlyph, shared.baseProvider
-local countdown, resetClock = shared.countdown, shared.resetClock
+local fixedCountdown = shared.fixedCountdown
 local ratio, headline, elapsedPercent = shared.ratio, shared.headline, shared.elapsedPercent
+local modelHeadlines, isCritical, dualMetrics = shared.modelHeadlines, shared.isCritical, shared.dualMetrics
 local pace, SEVERITY_RANK = shared.pace, shared.SEVERITY_RANK
 local NO_FAILURE, asFailure = shared.NO_FAILURE, shared.asFailure
 local unavailable, warning = shared.unavailable, shared.warning
 
 local failure = NO_FAILURE
+local scrollOffset = 0
+local scrollTargetId = nil
 
 -- ── Report helpers ────────────────────────────────────────────────────────────
 
@@ -54,7 +57,7 @@ local function shown()
             -- A pinned provider that stopped reporting leaves the capsule empty
             -- rather than holding a number nothing is refreshing.
             if entry.id == wanted then
-                if unavailable(entry) then return {}, 0 end
+                if unavailable(entry) and not shared.readFailure(entry) then return {}, 0 end
                 return { entry }, 0
             end
         end
@@ -66,7 +69,7 @@ local function shown()
         -- A provider whose service is down drops out on the first report that
         -- says so, rather than sitting there with a frozen reading. Not counted
         -- as hidden either: hidden means the panel has more to show.
-        if entry.status ~= "error" and not unavailable(entry) then
+        if (entry.status ~= "error" and not unavailable(entry)) or shared.readFailure(entry) then
             ready[#ready + 1] = entry
         end
     end
@@ -87,6 +90,28 @@ local function shown()
         if aPrimary ~= bPrimary then return aPrimary end
         return tostring(a.id) < tostring(b.id)
     end)
+
+    if scrollTargetId ~= nil then
+        local found = false
+        for index, entry in ipairs(ready) do
+            if entry.id == scrollTargetId then
+                scrollOffset = index - 1
+                found = true
+                break
+            end
+        end
+        if not found then scrollTargetId = nil end
+    end
+
+    if scrollOffset > 0 and #ready > 1 then
+        local offset = scrollOffset % #ready
+        local rotated = {}
+        for i = 1, #ready do
+            local idx = ((i - 1 + offset) % #ready) + 1
+            rotated[i] = ready[idx]
+        end
+        ready = rotated
+    end
 
     local picked = {}
     for i = 1, math.min(limit, #ready) do picked[i] = ready[i] end
@@ -126,38 +151,204 @@ end
 
 -- ── Rendering ─────────────────────────────────────────────────────────────────
 
--- Quota above, window elapsed below: a fill longer than the clock bar is spend
--- running ahead of time.
-local function bars(percent, elapsed, tint, width)
-    local stack = {
-        ui.progress({ progress = ratio(percent), fill = tint, track = "on_surface/0.16",
-                      radius = 3, width = width, height = 4 }),
-    }
-    if elapsed ~= nil then
-        stack[#stack + 1] = ui.progress({ progress = ratio(elapsed), fill = "on_surface/0.45",
-                                          track = "on_surface/0.10", radius = 1, width = width, height = 2 })
-    end
-    return ui.column({ gap = 1, align = "center" }, stack)
+local function metricFill(metric)
+    if not colorByUsage then return "primary" end
+    if isCritical(metric) then return "error" end
+    return severityRole(metric, "primary")
 end
 
-local function chip(entry, flagged)
+-- Upper and bigger bar (height 6, radius 3): 5h limit (session window)
+-- Lower and thinner bar (height 3, radius 2): weekly limit (7-day rate limit)
+local function bars(mShort, mWeekly, width)
+    if mShort == nil and mWeekly == nil then return nil end
+
+    local pShort = mShort and tonumber(mShort.percent)
+    local pWeekly = mWeekly and tonumber(mWeekly.percent)
+
+    if pShort == nil and pWeekly == nil then return nil end
+
+    local fShort = mShort and metricFill(mShort) or "primary"
+    local fWeekly = mWeekly and metricFill(mWeekly) or "primary"
+
+    -- Upper / bigger bar (height 6): 5h limit (or the single available metric)
+    local topProgress = pShort ~= nil and pShort or (pWeekly or 0)
+    local topFill = pShort ~= nil and fShort or fWeekly
+
+    local stack = {
+        ui.progress({
+            progress = ratio(topProgress),
+            fill = topFill,
+            track = "on_surface/0.14",
+            radius = 3,
+            width = width,
+            height = 6,
+        }),
+    }
+
+    -- Lower / thinner bar (height 3): weekly limit
+    if pWeekly ~= nil and pShort ~= nil then
+        stack[#stack + 1] = ui.progress({
+            progress = ratio(pWeekly),
+            fill = fWeekly,
+            track = "on_surface/0.10",
+            radius = 2,
+            width = width,
+            height = 3,
+        })
+    end
+
+    return ui.column({ gap = 2, align = "center" }, stack)
+end
+
+-- Compact vertical gauge: a track column holding a level box pinned to the bottom.
+-- Ideal for vertical bars and docks.
+local function miniGauge(percent, tint)
+    local level = type(percent) == "number" and math.max(0, math.min(100, percent)) / 100 or 0
+    local h = 14
+    local w = 6
+    local filled = level <= 0 and 1 or math.max(2, math.floor(h * level + 0.5))
+    return ui.column({
+        key = "mini-gauge",
+        width = w,
+        height = h,
+        minWidth = w,
+        minHeight = h,
+        radius = 2,
+        fill = "on_surface/0.16",
+        justify = "end",
+        align = "stretch",
+    }, {
+        ui.box({
+            key = "level",
+            width = w,
+            height = filled,
+            radius = 2,
+            fill = tint,
+        }),
+    })
+end
+
+local function chip(entry, flagged, isVert)
+    if shared.readFailure(entry) then
+        local nodes = { ui.label({ text = "—", fontSize = 11, color = "on_surface_variant" }) }
+        if showGlyph then
+            table.insert(nodes, glyphAfter and #nodes + 1 or 1,
+                ui.glyph({ name = providerGlyph(entry.id), size = 14, color = "error" }))
+        end
+        if isVert then
+            return ui.column({ gap = 2, align = "center" }, nodes)
+        end
+        return ui.row({ gap = 5, align = "center" }, nodes)
+    end
     local metric = headline(entry)
+    -- Balance-only providers carry no percentage; the capsule shows their
+    -- amount where a quota vendor shows its percentage.
+    local balance = metric == nil and shared.balanceText(entry) or nil
     local tint = severityRole(metric, "on_surface")
     local percent = metric ~= nil and tonumber(metric.percent) or nil
-    local text = percent ~= nil and string.format("%d%%", percent) or "—"
+    local text = percent ~= nil and string.format("%d%%", percent) or (balance or "—")
     local fill = severityRole(metric, "primary")
     -- The mark says which provider, never how full it is; severity rides on the
     -- reading and the gauge. A failed read is the one thing that colours it, and
     -- colours rather than appends: a glyph that exists only while the read fails
     -- would shove the neighbouring widget once per cycle. The tooltip still
     -- spells the failure out.
-    local glyph = showGlyph
-        and ui.glyph({ name = providerGlyph(entry.id), size = 13,
+    local submodels = modelHeadlines(entry)
+    local hasSubmodels = #submodels > 0
+
+    local glyph = (showGlyph and not hasSubmodels)
+        and ui.glyph({ name = providerGlyph(entry.id), size = 14,
                        color = flagged and "error" or "on_surface" }) or nil
-    -- Fixed width, right-aligned: the capsule is the same size at 9% as at 100%
-    -- and stops nudging its neighbours once per read.
-    local pct = showValue and ui.label({ text = text, fontSize = 11, fontWeight = "semibold",
-                                         color = tint, maxLines = 1, width = 30, textAlign = "end" }) or nil
+    local pct = nil
+    if showValue or hasSubmodels then
+        if hasSubmodels then
+            local parts = {}
+            for _, item in ipairs(submodels) do
+                local shownMetric = item.blockingMetric or item.metric
+                local mTint = colorByUsage and isCritical(shownMetric) and "error"
+                    or severityRole(shownMetric, "on_surface")
+                local mPct = tonumber(shownMetric.percent) or 0
+                local mFill = isCritical(shownMetric) and "error"
+                    or severityRole(shownMetric, "primary")
+                local rowChildren = {}
+                local modelGlyph = showGlyph and ui.glyph({
+                        name = item.glyph or providerGlyph(entry.id),
+                        size = 13,
+                        color = "on_surface",
+                    }) or nil
+                if modelGlyph and not glyphAfter then rowChildren[#rowChildren + 1] = modelGlyph end
+
+                local mMetrics = type(item.metrics) == "table" and item.metrics or { item.metric }
+                local mShort, mWeekly = dualMetrics(mMetrics)
+                local barNode = bars(mShort, mWeekly, 22)
+
+                if visualization == "gauge" and not isVert and not glyphAfter and barNode ~= nil then
+                    rowChildren[#rowChildren + 1] = barNode
+                end
+                if showValue then
+                    rowChildren[#rowChildren + 1] = ui.label({
+                        text = string.format("%d%%", mPct),
+                        fontSize = 11,
+                        fontWeight = "semibold",
+                        color = mTint,
+                        maxLines = 1,
+                    })
+                end
+                if visualization == "gauge" and not isVert and glyphAfter and barNode ~= nil then
+                    rowChildren[#rowChildren + 1] = barNode
+                end
+                if (extras == "countdown" or extras == "both") and not isVert then
+                    local left = fixedCountdown(shownMetric)
+                    if left ~= "" then
+                        rowChildren[#rowChildren + 1] = ui.label({
+                            text = left,
+                            fontSize = 10,
+                            color = "on_surface_variant",
+                            maxLines = 1,
+                        })
+                    end
+                end
+                if modelGlyph and glyphAfter then rowChildren[#rowChildren + 1] = modelGlyph end
+                if #parts > 0 and #rowChildren > 0 then
+                    parts[#parts + 1] = isVert
+                        and ui.box({ width = 10, height = 1, fill = "on_surface_variant", opacity = 0.25 })
+                        or ui.label({
+                            text = "·",
+                            fontSize = 11,
+                            color = "on_surface_variant",
+                        })
+                end
+                if #rowChildren > 0 then
+                    parts[#parts + 1] = isVert
+                        and ui.column({ gap = 2, align = "center" }, rowChildren)
+                        or ui.row({ gap = 3, align = "center" }, rowChildren)
+                end
+            end
+            pct = isVert
+                and ui.column({ gap = 3, align = "center" }, parts)
+                or ui.row({ gap = 7, align = "center" }, parts)
+        else
+            pct = ui.label({
+                text = text,
+                fontSize = 11,
+                fontWeight = "semibold",
+                color = tint,
+                maxLines = 1,
+            })
+        end
+    end
+
+    if isVert then
+        local vertNodes = {}
+        if not glyphAfter and glyph ~= nil then vertNodes[#vertNodes + 1] = glyph end
+        if percent ~= nil and visualization == "gauge" and not hasSubmodels then
+            vertNodes[#vertNodes + 1] = miniGauge(percent, fill)
+        end
+        if pct ~= nil then vertNodes[#vertNodes + 1] = pct end
+        if glyphAfter and glyph ~= nil then vertNodes[#vertNodes + 1] = glyph end
+        return ui.column({ gap = 2, align = "center" }, vertNodes)
+    end
+
     local name = showName and ui.label({ text = shortName(entry), fontSize = 11,
                                          color = "on_surface_variant", maxLines = 1 }) or nil
 
@@ -166,14 +357,19 @@ local function chip(entry, flagged)
 
     if not glyphAfter then add(glyph) end
     add(name)
-    if percent ~= nil and visualization == "gauge" then
-        add(bars(percent, elapsedPercent(metric and metric.detail), fill, 26))
+    if visualization == "gauge" and not hasSubmodels then
+        local mShort, mWeekly = dualMetrics(entry.metrics)
+        local barNode = bars(mShort, mWeekly, 32)
+        if barNode == nil and percent ~= nil then
+            barNode = bars({ percent = percent, severity = metric and metric.severity }, nil, 32)
+        end
+        add(barNode)
     end
     add(pct)
     if glyphAfter then add(glyph) end
 
-    if extras == "countdown" or extras == "both" then
-        local left = countdown(metric)
+    if (extras == "countdown" or extras == "both") and not hasSubmodels then
+        local left = fixedCountdown(metric)
         if left ~= "" then
             add(ui.label({ text = left, fontSize = 10, color = "on_surface_variant", maxLines = 1 }))
         end
@@ -193,7 +389,33 @@ local function chip(entry, flagged)
     if entry.stale == true then
         add(ui.glyph({ name = "clock-exclamation", size = 11, color = "secondary" }))
     end
-    return ui.row({ gap = 4, align = "center" }, nodes)
+    return ui.row({ gap = 5, align = "center" }, nodes)
+end
+
+local function formatDualMetric(m1, m2)
+    m1 = type(m1) == "table" and m1 or nil
+    m2 = type(m2) == "table" and m2 or nil
+    if m1 == nil and m2 == nil then return "" end
+
+    local p1 = m1 and (m1.percent ~= nil and tonumber(m1.percent) or tostring(m1.value or ""))
+    local p2 = m2 and (m2.percent ~= nil and tonumber(m2.percent) or tostring(m2.value or ""))
+
+    local str1 = type(p1) == "number" and string.format("%d%%", p1) or tostring(p1 or ""):gsub(" of ", " / ")
+    local str2 = type(p2) == "number" and string.format("%d%%", p2) or (p2 ~= nil and tostring(p2):gsub(" of ", " / ") or nil)
+
+    -- If one window is exhausted, its reset is the real unlock time. Showing
+    -- the shorter session reset would promise availability while the weekly
+    -- limit still blocks the model.
+    local blocking = shared.blockingMetric(m1 and { m1, m2 } or { m2 })
+    local left = blocking ~= nil and fixedCountdown(blocking) or ""
+    if left == "" and m1 ~= nil then left = fixedCountdown(m1) end
+    if left == "" and m2 ~= nil then left = fixedCountdown(m2) end
+
+    local val = str1
+    if str2 ~= nil and str2 ~= "" then
+        val = val .. " / " .. str2
+    end
+    return val, left
 end
 
 local function tooltip(picked, hidden)
@@ -224,19 +446,37 @@ local function tooltip(picked, hidden)
         if entry.status == "error" then
             rows[#rows + 1] = { key = title, value = tostring(entry.error or noctalia.tr("ui.unavailable")) }
         else
-            if entry.plan ~= nil and tostring(entry.plan) ~= "" then
-                rows[#rows + 1] = { key = title, value = tostring(entry.plan) }
-            end
-            local metrics = type(entry.metrics) == "table" and entry.metrics or {}
-            for _, metric in ipairs(metrics) do
-                if type(metric) == "table" then
-                    local value = tostring(metric.value or ""):gsub(" of ", " / ")
-                    local left = countdown(metric)
-                    if left ~= "" then
-                        local clock = resetClock(metric)
-                        value = value .. " · " .. left .. (clock ~= "" and (" (" .. clock .. ")") or "")
+            local submodels = modelHeadlines(entry)
+            if #submodels > 0 then
+                for _, item in ipairs(submodels) do
+                    local mMetrics = type(item.metrics) == "table" and item.metrics or { item.metric }
+                    local mShort, mWeekly = dualMetrics(mMetrics)
+                    local val, left = formatDualMetric(mShort, mWeekly)
+                    if val ~= "" then
+                        rows[#rows + 1] = { key = item.displayName or item.model, value = val }
+                        if left ~= "" then
+                            rows[#rows + 1] = { key = "Reset", value = left }
+                        end
                     end
-                    rows[#rows + 1] = { key = tostring(metric.label or ""), value = value }
+                end
+            else
+                local metrics = type(entry.metrics) == "table" and entry.metrics or {}
+                local mShort, mWeekly = dualMetrics(metrics)
+                local val, left = formatDualMetric(mShort, mWeekly)
+                if val ~= "" then
+                    rows[#rows + 1] = { key = title, value = val }
+                    if left ~= "" then
+                        rows[#rows + 1] = { key = "Reset", value = left }
+                    end
+                else
+                    -- A balance-only provider carries no metric: the tooltip shows
+                    -- the same balance the capsule does, ahead of the plan name.
+                    local balance = shared.balanceText(entry)
+                    if balance ~= nil then
+                        rows[#rows + 1] = { key = title, value = balance }
+                    elseif entry.plan ~= nil and tostring(entry.plan) ~= "" then
+                        rows[#rows + 1] = { key = title, value = tostring(entry.plan) }
+                    end
                 end
             end
             if entry.stale == true then
@@ -254,6 +494,7 @@ local function tooltip(picked, hidden)
 end
 
 local function render()
+    local isVert = type(barWidget.isVertical) == "function" and barWidget.isVertical() or false
     local picked, hidden = shown()
     -- A failed read does not erase the last one: the numbers stay, flagged,
     -- until a good report replaces them. Erasing them blanked the capsule over a
@@ -266,17 +507,18 @@ local function render()
         -- reads as part of the second. A dot, not a rule -- a vertical
         -- `ui.separator` in a row came out two pixels wide by one tall.
         if #children > 0 then
-            children[#children + 1] = ui.label({ text = "·", fontSize = 11,
-                                                 color = "on_surface_variant" })
+            children[#children + 1] = isVert
+                and ui.box({ width = 12, height = 1, fill = "on_surface_variant", opacity = 0.3 })
+                or ui.label({ text = "·", fontSize = 11, color = "on_surface_variant" })
         end
-        children[#children + 1] = chip(entry, flagged)
+        children[#children + 1] = chip(entry, flagged, isVert)
     end
 
     if #children == 0 then
         -- One glyph, coloured by the state. A second icon beside it would read as
         -- a second problem.
         children[1] = ui.glyph({
-            name = "brain", size = 13,
+            name = "brain", size = 14,
             color = failure.code ~= "" and "error" or "on_surface_variant",
         })
     elseif hidden > 0 then
@@ -284,7 +526,11 @@ local function render()
                                              color = "on_surface_variant", maxLines = 1 })
     end
 
-    barWidget.render(ui.row({ gap = 6, align = "center" }, children))
+    if isVert then
+        barWidget.render(ui.column({ gap = 5, align = "center" }, children))
+    else
+        barWidget.render(ui.row({ gap = 7, align = "center" }, children))
+    end
     barWidget.setTooltip(tooltip(picked, hidden))
 end
 
@@ -310,6 +556,27 @@ function onClick()
     noctalia.togglePanel("felipeartur/ai-usagebar:panel")
 end
 
+function onScroll(_axis, steps, _startsGesture)
+    if vendor ~= "auto" then return end
+    local ready = {}
+    for _, entry in ipairs(entries()) do
+        if (entry.status ~= "error" and not unavailable(entry)) or shared.readFailure(entry) then
+            ready[#ready + 1] = entry
+        end
+    end
+    if #ready <= 1 then return end
+
+    if steps > 0 then
+        scrollTargetId = nil
+        scrollOffset = (scrollOffset + 1) % #ready
+    elseif steps < 0 then
+        scrollTargetId = nil
+        scrollOffset = (scrollOffset - 1 + #ready) % #ready
+    end
+    local picked = shown()
+    scrollTargetId = picked[1] ~= nil and picked[1].id or nil
+    render()
+end
 
 report = noctalia.state.get("report")
 failure = asFailure(noctalia.state.get("error"))
